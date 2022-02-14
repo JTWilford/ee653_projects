@@ -20,10 +20,10 @@ using std::ios;
 using std::string;
 using std::endl;
 
-static constexpr UINT64 STORE_RESOLVE_CYCLES = 10;
-static constexpr UINT64 IBQ_SIZE = 64;
-static constexpr UINT64 MDPT_SIZE = 64;
-static constexpr UINT64 MDST_SIZE = 64;
+static const UINT64 STORE_RESOLVE_CYCLES = 10;
+static const UINT64 IBQ_SIZE = 64;
+static const UINT64 MDPT_SIZE = 64;
+static const UINT64 MDST_SIZE = 64;
 
 ofstream OutFile;
 // The running count of instructions is kept here
@@ -36,48 +36,48 @@ static UINT64 st_ins_count = 0;
 
 struct IBQ_entry {
     INS ins;
-    bool committed = true;
-    ADDRINT ea = 0;
-}
+    bool committed;
+    ADDRINT ea;
+};
 
-static IBQ_entry* IBQ;
+static IBQ_entry* IBQ = 0;
 static UINT64 IBQ_size = IBQ_SIZE;
 static UINT64 IBQ_tail = 0;
 static UINT64 IBQ_count = 0;
 
 struct MDPT_entry {
-    bool valid = 0;     // Valid flag
+    bool valid;     // Valid flag
     UINT64 ldpc;    // Load PC
     UINT64 stpc;    // Store PC
     UINT64 dist;    // Dependency distance
     UINT64 pred;    // 2-bit up/down predictor
-    UINT64 last_access = 0;     // Tracks last access cycle for LRU replacement strategy
+    UINT64 last_access;     // Tracks last access cycle for LRU replacement strategy
 };
-static MDPT_entry* MDPT;
+static MDPT_entry* MDPT = 0;
 
 struct MDST_entry {
-    bool valid = 0;     // Valid flag
+    bool valid;     // Valid flag
     UINT64 ldpc;    // Load PC
     UINT64 stpc;    // Store PC
     UINT64 ldid;    // Load ID
     UINT64 stid;    // Store ID
     UINT64 fe;      // Full/Empty flag
 };
-static MDST_entry* MDST;
+static MDST_entry* MDST = 0;
 
 VOID Init() {
     // Initialize IBQ
-    IBQ = malloc(sizeof(IBQ_entry) * IBQ_SIZE);
+    IBQ = (IBQ_entry*) malloc(sizeof(IBQ_entry) * IBQ_SIZE);
     // Initialize MDPT
-    MDPT = malloc(sizeof(MDPT_entry) * MDPT_SIZE);
-    for(int i = 0; i < MDPT_SIZE; i++) {
+    MDPT = (MDPT_entry*) malloc(sizeof(MDPT_entry) * MDPT_SIZE);
+    for(UINT64 i = 0; i < MDPT_SIZE; i++) {
         MDPT_entry mdpt;
         mdpt.valid = false;
         MDPT[i] = mdpt;
     }
     // Initialize MDST
-    MDST = malloc(sizeof(MDST_entry) * MDST_SIZE)
-    for(int i = 0; i < MDST_SIZE; i++) {
+    MDST = (MDST_entry*) malloc(sizeof(MDST_entry) * MDST_SIZE);
+    for(UINT64 i = 0; i < MDST_SIZE; i++) {
         MDST_entry mdst;
         mdst.valid = false;
         MDST[i] = mdst;
@@ -91,11 +91,11 @@ VOID Release() {
 }
 
 // Allocates the next available MDPT entry
-int allocateNewMDPTEntry() {
+UINT64 allocateNewMDPTEntry() {
     // Search for the first invalid entry, or the lease recently used entry
-    int lru = 0;
-    int lru_last_access = MDPT[0].last_access;
-    for (int i = 0; i < MDPT_SIZE; i++) {
+    UINT64 lru = 0;
+    UINT64 lru_last_access = MDPT[0].last_access;
+    for (UINT64 i = 0; i < MDPT_SIZE; i++) {
         // Invalid entry found. Return its index
         if (!MDPT[i].valid)
             return(i);
@@ -118,7 +118,7 @@ VOID docount(INS ins, ADDRINT ea) {
     // and a junior load was waiting, we can resolve both in one loop)
     bool committed_st = false;
     int committed_st_index = 0;
-    for (int i = IBQ_size - 1; i >= 0; i--) {
+    for (UINT64 i = IBQ_size - 1; i >= 0; i--) {
         int index = IBQ_tail - 1 - i;
         if (index < 0) {
             index = index + IBQ_SIZE;
@@ -129,8 +129,8 @@ VOID docount(INS ins, ADDRINT ea) {
             // Should be committed
             IBQ[index].committed = true;
             // Update the MDST as well
-            for (int j = 0; j < MDST_SIZE; j++) {
-                if (MDST[j].valid && MDST[j].stpc == INS_Address(IBQ[index].ins) && MDST[j].stid == index)
+            for (UINT64 j = 0; j < MDST_SIZE; j++) {
+                if (MDST[j].valid && MDST[j].stpc == INS_Address(IBQ[index].ins) && MDST[j].stid == (UINT64) index)
                     // Mark the entry as complete
                     MDST[j].fe = true;
             }
@@ -140,13 +140,14 @@ VOID docount(INS ins, ADDRINT ea) {
             committed_st_index = index;
         }
         // Second case: its a committed load. Need to check for a misprediction
-        else if (INS_IsMemoryRead(IBA[index].ins) && IBQ[index].committed && committed_st) {
+        else if (INS_IsMemoryRead(IBQ[index].ins) && IBQ[index].committed && committed_st) {
             // Check for mispredictions
             if (IBQ[index].ea == IBQ[committed_st_index].ea) {
                 // Misprediction detected
                 mispredictions++;
                 // Look for an MDPT entry to update
-                for (int j = 0; j < MDPT_SIZE; j++)
+                UINT64 j = 0;
+                for (; j < MDPT_SIZE; j++)
                     if (MDPT[j].valid && MDPT[j].ldpc == INS_Address(IBQ[index].ins) && MDPT[j].stpc == INS_Address(IBQ[committed_st_index].ins))
                         break;
                 if (j < MDPT_SIZE) {
@@ -165,33 +166,35 @@ VOID docount(INS ins, ADDRINT ea) {
                     mdpt.dist = diff;
                     mdpt.pred = 1;
                     mdpt.last_access = cycles;
-                    mdpt_index = allocateNewMDPTEntry();
+                    UINT64 mdpt_index = allocateNewMDPTEntry();
                     MDPT[mdpt_index] = mdpt;
                 }
             }
         }
         else if (INS_IsMemoryRead(IBQ[index].ins) && !IBQ[index].committed) {
             // Check MDST to see if the dependency was resolved
-            for (int j = 0; j < MDST_SIZE; j++) {
-                if (MDST[j].valid && MDST[j].ldpc == INS_Address(IBQ[index].ins) && MDST[j].ldid == index && MDST[j].fe) {
+            for (UINT64 j = 0; j < MDST_SIZE; j++) {
+                if (MDST[j].valid && MDST[j].ldpc == INS_Address(IBQ[index].ins) && MDST[j].ldid == (UINT64) index && MDST[j].fe) {
                     // Dependency was resolved.
                     // Check to see if it was a true dependency and update MDPT
                     // Find MDPT entry
-                    int k = 0;
+                    UINT64 k = 0;
                     for (; k < MDPT_SIZE; k++)
                         if (MDPT[k].valid && MDPT[k].ldpc == INS_Address(IBQ[index].ins) && MDPT[k].stpc == MDST[j].stpc)
                             break;
                     
                     // True dependency. Need to increment MDPT counter
-                    if (IBQ[MDST[j].stid].ea == IBQ[index].ea)
+                    if (IBQ[MDST[j].stid].ea == IBQ[index].ea) {
                         if (MDPT[k].pred != 3)
                             MDPT[k].pred++;
+                    }
                     // False dependency. Need to decrement MDPT counter and record a misprediction
-                    else
+                    else {
                         if (MDPT[k].pred != 0) {
                             MDPT[k].pred--;
                             mispredictions++;
                         }
+                    }
                     // Set MDPT last access time
                     MDPT[k].last_access = cycles;
                     // Invalidate MDST entry
@@ -202,18 +205,17 @@ VOID docount(INS ins, ADDRINT ea) {
     }
 
     // Create a new IBQ entry
-    IBQ ibq;
+    IBQ_entry ibq;
     ibq.ins = ins;
-    ibq.cycle = cycles;
     ibq.ea = ea;
     // If the instruction is a load or a store, it won't be committed yet
     ibq.committed = !(INS_IsMemoryWrite(ins) || INS_IsMemoryRead(ins));
     
-    UINT64 ins_pc = INS_Address(ins);
     // If the instruction was a load, we have to search for potential store dependencies in MDPT
     if (INS_IsMemoryRead(ins)) {
+        ld_ins_count++;
         // Walk throught the MDPT, looking for historic store conflicts
-        int i = 0;
+        UINT64 i = 0;
         for (; i < MDPT_SIZE; i++)
             if (MDPT[i].valid && MDPT[i].ldpc == INS_Address(ins))
                 break;
@@ -230,12 +232,12 @@ VOID docount(INS ins, ADDRINT ea) {
         // If we predict dependency, we need to update the MDST entry
         if (!ibq.committed) {
             // Walk through the MDST to find the corresponding entry (should have been made when store entered IBQ)
-            int st_index = IBQ_tail - MDPT[i].diff;
+            int st_index = IBQ_tail - MDPT[i].dist;
             if (st_index < 0)
                 st_index = st_index + IBQ_SIZE;
-            int j = 0;
+            UINT64 j = 0;
             for (; j < MDST_SIZE; j++)
-                if (MDST[j].valid && MDST[j].ldpc == MDPT[i].ldpc && MDST[j].stpc == MDPT[i].stpc && MDST[j].stid == st_index)
+                if (MDST[j].valid && MDST[j].ldpc == MDPT[i].ldpc && MDST[j].stpc == MDPT[i].stpc && MDST[j].stid == (UINT64) st_index)
                     break;
             // Found the entry. Add the load ID
             MDST[j].ldid = IBQ_tail;
@@ -243,9 +245,10 @@ VOID docount(INS ins, ADDRINT ea) {
     }
     // If the instruction is a store, we have to search for potential load dependencies in MDPT
     if (INS_IsMemoryWrite(ins)) {
+        st_ins_count++;
         // Walk through the MDPT, looking for previous load conflicts
-        for (int i = 0; i < MDPT_SIZE; i++) {
-            if (MDPT[i].valid && MDPT[i].stpc = INS_Address(ins) && MDPT[i].pred >= 2) {
+        for (UINT64 i = 0; i < MDPT_SIZE; i++) {
+            if (MDPT[i].valid && MDPT[i].stpc == INS_Address(ins) && MDPT[i].pred >= 2) {
                 // Found a predicted conflict. Make a new MDST entry
                 MDST_entry mdst;
                 mdst.valid = true;
@@ -255,7 +258,7 @@ VOID docount(INS ins, ADDRINT ea) {
                 mdst.stid = IBQ_tail;
                 mdst.fe = false;
                 // Insert into the MDST wherever there's an invalid entry
-                for (j = 0; j < MDST_SIZE; j++)
+                for (UINT64 j = 0; j < MDST_SIZE; j++)
                     if (!MDST[j].valid)
                         MDST[j] = mdst;
             }
@@ -319,7 +322,7 @@ int main(int argc, char * argv[])
 
     InputFile >> input;
     
-    cout << "Here was the input file:" << endl << input << endl;
+    //cout << "Here was the input file:" << endl << input << endl;
 
     // Register Instruction to be called to instrument instructions
     INS_AddInstrumentFunction(Instruction, 0);
