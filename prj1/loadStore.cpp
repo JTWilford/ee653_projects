@@ -38,7 +38,7 @@ static UINT64 mispredictions = 0;
 static UINT64 speculations = 0;
 static UINT64 mis_speculations = 0;
 static UINT64 false_deps = 0;
-static double avg_ldst_buffer_time = 0.0;
+static UINT64 ldst_buffer_time = 0;
 
 struct IBQ_entry {
     ADDRINT addr;
@@ -125,7 +125,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
     // We're starting from the top of the IBQ rather than the bottom
     // so we can chain resolve instructions (ie. if a store resolves,
     // and a junior load was waiting, we can resolve both in one loop)
-    cout << "Cycle: " << cycles << endl;
+    // cout << "Cycle: " << cycles << endl;
     bool committed_st = false;
     int committed_st_index = 0;
     if (IBQ_count) {
@@ -156,10 +156,9 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                 if (IBQ[index].ea == IBQ[committed_st_index].ea) {
                     // Mis-speculation detected
                     mis_speculations++;
-                    mispredictions++;
                     
                     // Update average load store buffer time (assume loads always spend at least 1 cycle in lsb)
-                    avg_ldst_buffer_time += (1.0 / (double)ld_ins_count);
+                    ldst_buffer_time++;
 
                     // Look for an MDPT entry to update
                     UINT64 j = 0;
@@ -169,6 +168,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                     if (j < MDPT_SIZE) {
                         // MDPT entry found. Increment it because a true dependency was found
                         MDPT[j].pred++;
+                        mispredictions++;
                     }
                     else {
                         // No MDPT entry found. Make a new one
@@ -197,7 +197,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                         int time = IBQ_tail - index;
                         if (time < 0)
                             time = -1 * time;
-                        avg_ldst_buffer_time += ((double)time / (double)ld_ins_count);
+                        ldst_buffer_time += time;
                         // Check to see if it was a true dependency and update MDPT
                         // Find MDPT entry
                         UINT64 k = 0;
@@ -239,6 +239,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
     
     // If the instruction was a load, we have to search for potential store dependencies in MDPT
     if (ins_ld) {
+        ldst_buffer_time += 1;
         ld_ins_count++;
         // Walk throught the MDPT, looking for historic store conflicts
         UINT64 i = 0;
@@ -254,14 +255,14 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
             if (ibq.committed) {
                 speculations++;
                 // Update average load store buffer time (assume loads always spend at least 1 cycle in lsb)
-                avg_ldst_buffer_time += (1.0 / (double)ld_ins_count);
+                
             }
         }
         else {
             // No MDPT entry found. We always predict no dependency here
             ibq.committed = true;
             // Update average load store buffer time (assume loads always spend at least 1 cycle in lsb)
-            avg_ldst_buffer_time += (1.0 / (double)ld_ins_count);
+            //ldst_buffer_time += 1;
             // Check for stores within previous resolve cycle instructions (this is for statistics only)
             // This determines whether the load was speculative or not
             for (UINT64 k = 0; k < STORE_RESOLVE_CYCLES; k++) {
@@ -360,15 +361,15 @@ VOID Fini(INT32 code, VOID *v)
     OutFile << "Total Instructions: " << cycles << endl;
     OutFile << "Total Loads: " << ld_ins_count << endl;
     OutFile << "Total Stores: " << st_ins_count << endl;
-    OutFile << "Total Predictions: " << predictions << endl;
-    OutFile << "Total Mispredictions: " << mispredictions << endl;
+    OutFile << "Total MDPT Predictions: " << predictions << endl;
+    OutFile << "Total MDPT Mispredictions: " << mispredictions << endl;
     OutFile << "Misprediction Rate: " << (double)mispredictions / (double)predictions << endl;
-    OutFile << "Total Speculations: " << speculations << endl;
-    OutFile << "Total Mis-speculations: " << mis_speculations << endl;
+    OutFile << "Total Load Speculations: " << speculations << endl;
+    OutFile << "Total Load Mis-speculations: " << mis_speculations << endl;
     OutFile << "Mis-speculation Rate: " << (double)mis_speculations / (double)speculations << endl;
     OutFile << "Total False Dependencies: "<< false_deps << endl;
     OutFile << "Mis-speculations due to False Dependencies: " << (double)false_deps / (double)mis_speculations << endl;
-    OutFile << "Avg. Time in LD/ST Buffer (Loads): " << avg_ldst_buffer_time << endl;
+    OutFile << "Avg. Time in LD/ST Buffer (Loads): " << (double) ldst_buffer_time / (double) ld_ins_count << endl;
     OutFile.close();
 
     Release();
