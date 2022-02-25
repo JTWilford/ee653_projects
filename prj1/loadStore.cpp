@@ -40,10 +40,13 @@ static UINT64 mis_speculations = 0;
 static UINT64 false_deps = 0;
 static UINT64 ldst_buffer_time = 0;
 
+static UINT64 uncommitted_stores = 0;   // Keeps track of the number of uncommitted stores in IBQ
+
 struct IBQ_entry {
     ADDRINT addr;
     bool st;
     bool ld;
+    bool speculative;
     bool committed;
     ADDRINT ea;
 };
@@ -126,107 +129,122 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
     // so we can chain resolve instructions (ie. if a store resolves,
     // and a junior load was waiting, we can resolve both in one loop)
     // cout << "Cycle: " << cycles << endl;
-    bool committed_st = false;
-    int committed_st_index = 0;
-    if (IBQ_count) {
-        for (UINT64 i = IBQ_count-1; i != 0; i--) {
-            int index = IBQ_tail - 1 - i;
-            if (index < 0) {
-                index = index + IBQ_SIZE;
-            }
-            // Look for loads and stores
-            // First case: uncommitted store. Its committed after a number of cycles of IBQ time
-            if (IBQ[index].st && !IBQ[index].committed && i >= STORE_RESOLVE_CYCLES) {
-                // Should be committed
-                IBQ[index].committed = true;
-                // Update the MDST as well
-                for (UINT64 j = 0; j < MDST_SIZE; j++) {
-                    if (MDST[j].valid && MDST[j].stpc == IBQ[index].addr && MDST[j].stid == (UINT64) index)
-                        // Mark the entry as complete
-                        MDST[j].fe = true;
-                }
-                // Key observatoin: Only one store should ever commit in this loop (since its executed every cycle)
-                // Makes determining mis-speculations really easy
-                committed_st = true;
-                committed_st_index = index;
-            }
-            // Second case: its a committed load. Need to check for a mis-speculations
-            else if (IBQ[index].ld && IBQ[index].committed && committed_st) {
-                // Check for mis-speculations
-                if (IBQ[index].ea == IBQ[committed_st_index].ea) {
-                    // Mis-speculation detected
-                    mis_speculations++;
-                    
-                    // Update average load store buffer time (assume loads always spend at least 1 cycle in lsb)
-                    ldst_buffer_time++;
 
-                    // Look for an MDPT entry to update
-                    UINT64 j = 0;
-                    for (; j < MDPT_SIZE; j++)
-                        if (MDPT[j].valid && MDPT[j].ldpc == IBQ[index].addr && MDPT[j].stpc == IBQ[committed_st_index].addr)
-                            break;
-                    if (j < MDPT_SIZE) {
-                        // MDPT entry found. Increment it because a true dependency was found
-                        MDPT[j].pred++;
-                        mispredictions++;
-                    }
-                    else {
-                        // No MDPT entry found. Make a new one
-                        int diff = index - committed_st_index;
-                        if (diff < 0)
-                            diff = diff + IBQ_SIZE;
-                        MDPT_entry mdpt;
-                        mdpt.valid = true;
-                        mdpt.ldpc = IBQ[index].addr;
-                        mdpt.stpc = IBQ[committed_st_index].addr;
-                        mdpt.dist = diff;
-                        mdpt.pred = 1;
-                        mdpt.last_access = cycles;
-                        UINT64 mdpt_index = allocateNewMDPTEntry();
-                        MDPT[mdpt_index] = mdpt;
-                    }
-                }
-            }
-            else if (IBQ[index].ld && !IBQ[index].committed) {
-                // Check MDST to see if the dependency was resolved
-                for (UINT64 j = 0; j < MDST_SIZE; j++) {
-                    if (MDST[j].valid && MDST[j].ldpc == IBQ[index].addr && MDST[j].ldid == (UINT64) index && MDST[j].fe) {
-                        // Dependency was resolved.
-                        IBQ[index].committed = true;
-                        // Calculate time spent in LDST Buffer (statistics)
-                        int time = IBQ_tail - index;
-                        if (time < 0)
-                            time = -1 * time;
-                        ldst_buffer_time += time;
-                        // Check to see if it was a true dependency and update MDPT
-                        // Find MDPT entry
+    // We only check if its been STORE_RESOLVE_CYCLES since a store has entered IBQ
+    if (IBQ_count >= STORE_RESOLVE_CYCLES) {
+        int index = IBQ_tail - STORE_RESOLVE_CYCLES;
+        if (index < 0) {
+            index = index + IBQ_SIZE;
+        }
+        // Look for uncommitted store
+        if (IBQ[index].st && !IBQ[index].committed) {
+            // Should be committed
+            IBQ[index].committed = true;
+            uncommitted_stores--;
+            // Update the MDST as well
+            for (UINT64 j = 0; j < MDST_SIZE; j++) {
+                if (MDST[j].valid && MDST[j].stpc == IBQ[index].addr && MDST[j].stid == (UINT64) index) {
+                    // Mark the entry as complete
+                    MDST[j].fe = true;
+                    
+                    cout << "Res MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << endl;
+                    // Commit the corresponding Load (if it exists)
+                    UINT64 ldid = MDST[j].ldid;
+                    // Make sure the entry was actually used
+                    if (ldid < IBQ_SIZE && IBQ[ldid].ld && IBQ[ldid].addr == MDST[j].ldpc) {
+                        // Find the corresponding MDPT table entry for updating
                         UINT64 k = 0;
                         for (; k < MDPT_SIZE; k++)
-                            if (MDPT[k].valid && MDPT[k].ldpc == IBQ[index].addr && MDPT[k].stpc == MDST[j].stpc)
+                            if (MDPT[k].valid && MDPT[k].ldpc == IBQ[ldid].addr && MDPT[k].stpc == IBQ[index].addr)
                                 break;
-                        
-                        // True dependency. Need to increment MDPT counter
-                        if (IBQ[MDST[j].stid].ea == IBQ[index].ea) {
-                            if (MDPT[k].pred != 3)
+                        MDPT[k].last_access = cycles;
+                        // Check whether it was a true dependency, and whether the prediction was correct
+                        if (IBQ[ldid].ea == IBQ[index].ea) {
+                            // True dependecy found. Update MDPT and Check for misprediction
+                            if (MDPT[k].pred < 3)
                                 MDPT[k].pred++;
-                        }
-                        // False dependency. Need to decrement MDPT counter and record a misprediction
-                        else {
-                            if (MDPT[k].pred != 0) {
-                                MDPT[k].pred--;
-                                false_deps++;
+                            cout << "Prd MDPT: " << k << ": L" << MDPT[k].ldpc << " S" << MDPT[k].stpc << " D" << MDPT[k].dist << " P" << MDPT[k].pred << endl;
+                            if (IBQ[ldid].speculative) {
+                                // MDPT Misprediction and Mis-speculation
                                 mispredictions++;
+                                mis_speculations++;
+                                // Put the Load back through the LSQ (1 cycle penalty)
+                                ldst_buffer_time++;
+                                IBQ[ldid].speculative = false;
+                                IBQ[ldid].committed = true;
+                            }
+                            else {
+                                // Commit the Load
+                                IBQ[ldid].committed = true;
+                                // Add the Load's waiting time in the LSQ
+                                int time = IBQ_tail - ldid;
+                                if (time < 0) {
+                                    time += IBQ_SIZE;
+                                }
+                                ldst_buffer_time += time;
                             }
                         }
-                        // Set MDPT last access time
-                        MDPT[k].last_access = cycles;
-                        // Invalidate MDST entry
-                        MDST[j].valid = false;
+                        else {
+                            // False dependency found. Update MDPT and check for misprediction
+                            if (MDPT[k].pred > 0)
+                                MDPT[k].pred--;
+                            cout << "Prd MDPT: " << k << ": L" << MDPT[k].ldpc << " S" << MDPT[k].stpc << " D" << MDPT[k].dist << " P" << MDPT[k].pred << endl;
+                            if (!IBQ[ldid].speculative) {
+                                mispredictions++;
+                                false_deps++;
+                                // Commit the Load
+                                IBQ[ldid].committed = true;
+                                // Add the Load's waiting time in the LSQ
+                                int time = IBQ_tail - ldid;
+                                if (time < 0) {
+                                    time += IBQ_SIZE;
+                                }
+                                ldst_buffer_time += time;
+                            }
+                            else {
+                                // If it was speculative, just mark it as committed
+                                IBQ[ldid].speculative = false;
+                                IBQ[ldid].committed = true;
+                            }
+                        }
                     }
+                }
+            }
+            // Now we need to walk through the last STORE_RESOLVE_CYCLES IBQ entries to find uncaught Load conflicts
+            // NOTE: We are doing this step by walking the IBQ because we don't have a CDB in this simulation
+            for (UINT64 j = 1; j <= STORE_RESOLVE_CYCLES; j++) {
+                int jindex = IBQ_tail - j;
+                if (jindex < 0) {
+                    jindex = jindex + IBQ_SIZE;
+                }
+                if (IBQ[jindex].speculative && IBQ[jindex].ea == IBQ[index].ea) {
+                    // Found a Load conflict without an MDPT entry
+                    // Mis-speculation
+                    mis_speculations++;
+                    // Commit the Load
+                    IBQ[jindex].committed = true;
+                    IBQ[jindex].speculative = false;
+                    ldst_buffer_time++;
+                    // Make a new MDPT entry
+                    int diff = jindex - index;
+                    if (diff < 0)
+                        diff = diff + IBQ_SIZE;
+                    MDPT_entry mdpt;
+                    mdpt.valid = true;
+                    mdpt.ldpc = IBQ[jindex].addr;
+                    mdpt.stpc = IBQ[index].addr;
+                    mdpt.dist = diff;
+                    mdpt.pred = 1;
+                    mdpt.last_access = cycles;
+                    UINT64 mdpt_index = allocateNewMDPTEntry();
+                    MDPT[mdpt_index] = mdpt;
+
+                    cout << "New MDPT: " << mdpt_index << ": L" << MDPT[mdpt_index].ldpc << " S" << MDPT[mdpt_index].stpc << " D" << MDPT[mdpt_index].dist << " P" << MDPT[mdpt_index].pred << endl;
                 }
             }
         }
     }
+    // Done with committing stores
 
     // Create a new IBQ entry
     IBQ_entry ibq;
@@ -234,12 +252,9 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
     ibq.st = ins_st;
     ibq.ld = ins_ld;
     ibq.ea = ea;
-    // If the instruction is a load or a store, it won't be committed yet
-    ibq.committed = !(ins_st || ins_ld);
     
     // If the instruction was a load, we have to search for potential store dependencies in MDPT
     if (ins_ld) {
-        ldst_buffer_time += 1;
         ld_ins_count++;
         // Walk throught the MDPT, looking for historic store conflicts
         UINT64 i = 0;
@@ -247,39 +262,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
             if (MDPT[i].valid && MDPT[i].ldpc == ins_addr)
                 break;
         if (i < MDPT_SIZE) {
-            // Found an MDPT entry. Predict whether there is a dependency
-            // We mark the instruction as committed if we predict no dependency
-            ibq.committed = (MDPT[i].pred < 2);
-            predictions++;
-            // If committed, then this was a speculation (statistics)
-            if (ibq.committed) {
-                speculations++;
-                // Update average load store buffer time (assume loads always spend at least 1 cycle in lsb)
-                
-            }
-        }
-        else {
-            // No MDPT entry found. We always predict no dependency here
-            ibq.committed = true;
-            // Update average load store buffer time (assume loads always spend at least 1 cycle in lsb)
-            //ldst_buffer_time += 1;
-            // Check for stores within previous resolve cycle instructions (this is for statistics only)
-            // This determines whether the load was speculative or not
-            for (UINT64 k = 0; k < STORE_RESOLVE_CYCLES; k++) {
-                int index = IBQ_tail - k;
-                if (index < 0)
-                    index = index + IBQ_tail;
-                if (IBQ[index].st) {
-                    predictions++;
-                    speculations++;
-                    break;
-                }
-            }
-        }
-
-        // If we predict dependency, we need to update the MDST entry
-        if (!ibq.committed) {
-            // Walk through the MDST to find the corresponding entry (should have been made when store entered IBQ)
+            // Find the corresponding MDST entry
             int st_index = IBQ_tail - MDPT[i].dist;
             if (st_index < 0)
                 st_index = st_index + IBQ_SIZE;
@@ -289,16 +272,59 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                     break;
             // Found the entry. Add the load ID
             MDST[j].ldid = IBQ_tail;
+            cout << "Udt MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << endl;
+
+            // If the store has already committed, then no need to predict
+            if (MDST[j].fe) {
+                ibq.speculative = false;
+                ibq.committed = true;
+                ldst_buffer_time++;
+            }
+            // Predict whether there is a dependency
+            else {
+                predictions++;
+                if (MDPT[i].pred < 2) {
+                    // Predict no dependency (speculate)
+                    speculations++;
+                    ibq.speculative = true;
+                    ibq.committed = false;
+                    ldst_buffer_time++;
+                }
+                else {
+                    // Predict dependency
+                    ibq.speculative = false;
+                    ibq.committed = false;
+                }
+            }
+        }
+        else {
+            // No MDPT entry found. We always predict no dependency here
+            // If there are uncommitted stores in the IBQ, then we speculate
+            if (uncommitted_stores > 0) {
+                speculations++;
+                ibq.speculative = true;
+                ibq.committed = false;
+                ldst_buffer_time++;
+            }
+            else {
+                // No uncommitted stores, so this load is fully committed (no speculation)
+                ibq.speculative = false;
+                ibq.committed = true;
+                ldst_buffer_time++;
+            }
         }
     }
+
     // If the instruction is a store, we have to search for potential load dependencies in MDPT
-    
     if (ins_st) {
         st_ins_count++;
+        uncommitted_stores++;
+        ibq.committed = false;
+        ibq.speculative = false;
         // Walk through the MDPT, looking for previous load conflicts
         for (UINT64 i = 0; i < MDPT_SIZE; i++) {
-            if (MDPT[i].valid && MDPT[i].stpc == ins_addr && MDPT[i].pred >= 2) {
-                // Found a predicted conflict. Make a new MDST entry
+            if (MDPT[i].valid && MDPT[i].stpc == ins_addr) {
+                // Found a previous conflict. Make a new MDST entry
                 MDST_entry mdst;
                 mdst.valid = true;
                 mdst.ldpc = MDPT[i].ldpc;
@@ -306,19 +332,39 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                 mdst.ldid = IBQ_SIZE;
                 mdst.stid = IBQ_tail;
                 mdst.fe = false;
+
                 // Insert into the MDST wherever there's an invalid entry
-                for (UINT64 j = 0; j < MDST_SIZE; j++)
-                    if (!MDST[j].valid)
+                for (UINT64 j = 0; j < MDST_SIZE; j++) {
+                    if (!MDST[j].valid) {
                         MDST[j] = mdst;
+                        cout << "New MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << endl;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Retire the top most instruction in the IBQ (if the IBQ is full)
+    if (IBQ_count >= IBQ_SIZE) {
+        // If its a store, then we need to remove its MDST entries
+        if (IBQ[IBQ_tail].st) {
+            // Walk through MDST to invalidate all this Store's entries
+            UINT64 j = 0;
+            for (; j < MDST_SIZE; j++) {
+                if (MDST[j].valid && MDST[j].stpc == IBQ[IBQ_tail].addr && MDST[j].stid == IBQ_tail) {
+                    MDST[j].valid = false;
+                }
             }
         }
     }
 
     // Add the new instruction to the IBQ
-    IBQ[IBQ_tail++] = ibq;
+    IBQ[IBQ_tail] = ibq;
+    IBQ_tail++;
     if (IBQ_tail >= IBQ_SIZE)
         IBQ_tail = 0;
-    if (IBQ_count < IBQ_SIZE-1)
+    if (IBQ_count < IBQ_SIZE)
         IBQ_count++;
 }
     
