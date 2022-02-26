@@ -1,5 +1,6 @@
 # EE 653 Lab 1 - MDPT and MDST Simulation with PIN
 Kyle Tseng <kyletsen@usc.edu>
+
 Justin Wilford <jwilford@usc.edu>
 
 ## Running the Simulation
