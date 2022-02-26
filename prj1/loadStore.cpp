@@ -12,6 +12,7 @@
 #include <iostream>
 #include <fstream>
 #include <stdlib.h>
+#include <string>
 #include "pin.H"
 using std::cerr;
 using std::cout;
@@ -21,10 +22,10 @@ using std::ios;
 using std::string;
 using std::endl;
 
-static const UINT64 STORE_RESOLVE_CYCLES = 10;
-static const UINT64 IBQ_SIZE = 64;
-static const UINT64 MDPT_SIZE = 64;
-static const UINT64 MDST_SIZE = 64;
+static UINT64 STORE_RESOLVE_CYCLES = 30;
+static UINT64 IBQ_SIZE = 64;
+static UINT64 MDPT_SIZE = 128;
+static UINT64 MDST_SIZE = 128;
 
 ofstream OutFile;
 // The running count of instructions is kept here
@@ -94,6 +95,23 @@ VOID Init() {
         mdst.valid = false;
         MDST[i] = mdst;
     }
+    // Load Store Window from file
+    ifstream input;
+    input.open("input.txt");
+    input >> STORE_RESOLVE_CYCLES;
+    // Calculate IBQ/MDPT/MDST size
+    // integer log2(n)s
+    int base = 0;
+    UINT64 calc = STORE_RESOLVE_CYCLES;
+    while (calc > 0) {
+        base++;
+        calc = calc>>1;
+    }
+    base++;
+    IBQ_SIZE = 1<<base;
+    MDPT_SIZE = IBQ_SIZE;
+    MDST_SIZE = IBQ_SIZE;
+    cout << "STORE_RESOLVE_CYCLES = " << STORE_RESOLVE_CYCLES << endl << "IBQ_SIZE = " << IBQ_SIZE << endl;
 }
 
 VOID Release() {
@@ -147,7 +165,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                     // Mark the entry as complete
                     MDST[j].fe = true;
                     
-                    cout << "Res MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << endl;
+                    // cout << "Res MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << " FE" << MDST[j].fe << endl;
                     // Commit the corresponding Load (if it exists)
                     UINT64 ldid = MDST[j].ldid;
                     // Make sure the entry was actually used
@@ -161,9 +179,11 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                         // Check whether it was a true dependency, and whether the prediction was correct
                         if (IBQ[ldid].ea == IBQ[index].ea) {
                             // True dependecy found. Update MDPT and Check for misprediction
-                            if (MDPT[k].pred < 3)
+                            // cout << "True Dep" << endl;
+                            if (MDPT[k].pred < 3) {
                                 MDPT[k].pred++;
-                            cout << "Prd MDPT: " << k << ": L" << MDPT[k].ldpc << " S" << MDPT[k].stpc << " D" << MDPT[k].dist << " P" << MDPT[k].pred << endl;
+                            }
+                            // cout << "Prd MDPT: " << k << ": L" << MDPT[k].ldpc << " S" << MDPT[k].stpc << " D" << MDPT[k].dist << " P" << MDPT[k].pred << endl;
                             if (IBQ[ldid].speculative) {
                                 // MDPT Misprediction and Mis-speculation
                                 mispredictions++;
@@ -186,10 +206,12 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                         }
                         else {
                             // False dependency found. Update MDPT and check for misprediction
-                            if (MDPT[k].pred > 0)
+                            if (MDPT[k].pred > 0) {
                                 MDPT[k].pred--;
-                            cout << "Prd MDPT: " << k << ": L" << MDPT[k].ldpc << " S" << MDPT[k].stpc << " D" << MDPT[k].dist << " P" << MDPT[k].pred << endl;
+                            }
+                            // cout << "Prd MDPT: " << k << ": L" << MDPT[k].ldpc << " S" << MDPT[k].stpc << " D" << MDPT[k].dist << " P" << MDPT[k].pred << endl;
                             if (!IBQ[ldid].speculative) {
+                                // cout << "False Dep" << endl;
                                 mispredictions++;
                                 false_deps++;
                                 // Commit the Load
@@ -239,7 +261,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                     UINT64 mdpt_index = allocateNewMDPTEntry();
                     MDPT[mdpt_index] = mdpt;
 
-                    cout << "New MDPT: " << mdpt_index << ": L" << MDPT[mdpt_index].ldpc << " S" << MDPT[mdpt_index].stpc << " D" << MDPT[mdpt_index].dist << " P" << MDPT[mdpt_index].pred << endl;
+                    // cout << "New MDPT: " << mdpt_index << ": L" << MDPT[mdpt_index].ldpc << " S" << MDPT[mdpt_index].stpc << " D" << MDPT[mdpt_index].dist << " P" << MDPT[mdpt_index].pred << endl;
                 }
             }
         }
@@ -268,20 +290,41 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                 st_index = st_index + IBQ_SIZE;
             UINT64 j = 0;
             for (; j < MDST_SIZE; j++)
-                if (MDST[j].valid && MDST[j].ldpc == MDPT[i].ldpc && MDST[j].stpc == MDPT[i].stpc && MDST[j].stid == (UINT64) st_index)
+                if (MDST[j].valid && MDST[j].ldpc == MDPT[i].ldpc && MDST[j].stpc == MDPT[i].stpc && MDST[j].ldid == IBQ_SIZE)
                     break;
-            // Found the entry. Add the load ID
-            MDST[j].ldid = IBQ_tail;
-            cout << "Udt MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << endl;
-
+            if (j == MDST_SIZE) {
+                // The store never made it to the pipeline
+                // No need to speculate
+                ibq.speculative = false;
+                ibq.committed = true;
+                ldst_buffer_time++;
+                //Something bad happened. Print some info
+                // cout << "ADDR.ID.EA.LD.ST.SPEC.COMMIT" << endl;
+                // printf("Load: %lx.%d.%lx.%d.%d.%d.%d\n", ibq.addr, (int) IBQ_tail, ibq.ea, ibq.ld, ibq.st, ibq.speculative, ibq.committed);
+                // cout << "Expected Store at ID " << st_index << endl;
+                // printf("Stor: %lx.%d.%lx.%d.%d.%d.%d\n", IBQ[st_index].addr, st_index, IBQ[st_index].ea, IBQ[st_index].ld, IBQ[st_index].st, IBQ[st_index].speculative, IBQ[st_index].committed);
+                // // Now see if store actually exists
+                // for (UINT64 ii = 0; ii < IBQ_SIZE; ii++) {
+                //     if (IBQ[ii].st && IBQ[ii].addr == MDPT[i].stpc) {
+                //         cout << "Found potential real match at " << ii << endl;
+                //         printf("Stor: %lx.%d.%lx.%d.%d.%d.%d\n", IBQ[ii].addr, (int) ii, IBQ[ii].ea, IBQ[ii].ld, IBQ[ii].st, IBQ[ii].speculative, IBQ[ii].committed);
+                //     }
+                // }
+            }
             // If the store has already committed, then no need to predict
-            if (MDST[j].fe) {
+            else if (MDST[j].fe) {
+                // Found the entry. Add the load ID
+                MDST[j].ldid = IBQ_tail;
+                // cout << "Udt MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << " FE" << MDST[j].fe << endl;
                 ibq.speculative = false;
                 ibq.committed = true;
                 ldst_buffer_time++;
             }
             // Predict whether there is a dependency
             else {
+                // Found the entry. Add the load ID
+                MDST[j].ldid = IBQ_tail;
+                // cout << "Udt MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << " FE" << MDST[j].fe << endl;
                 predictions++;
                 if (MDPT[i].pred < 2) {
                     // Predict no dependency (speculate)
@@ -337,7 +380,7 @@ VOID docount(ADDRINT ins_addr, bool ins_st, bool ins_ld, ADDRINT ea) {
                 for (UINT64 j = 0; j < MDST_SIZE; j++) {
                     if (!MDST[j].valid) {
                         MDST[j] = mdst;
-                        cout << "New MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << endl;
+                        // cout << "New MDST: " << j << ": L" << MDST[j].ldpc << " S" << MDST[j].stpc << " DL" << MDST[j].ldid << " DS" << MDST[j].stid << " FE" << MDST[j].fe << endl;
                         break;
                     }
                 }
@@ -404,6 +447,7 @@ VOID Fini(INT32 code, VOID *v)
 {
     // Write to a file since cout and cerr maybe closed by the application
     OutFile.setf(ios::showbase);
+    OutFile << "Store Resolve Window: " << STORE_RESOLVE_CYCLES << endl;
     OutFile << "Total Instructions: " << cycles << endl;
     OutFile << "Total Loads: " << ld_ins_count << endl;
     OutFile << "Total Stores: " << st_ins_count << endl;

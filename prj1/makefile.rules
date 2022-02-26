@@ -17,7 +17,7 @@
 # This defines tests which run tools of the same name.  This is simply for convenience to avoid
 # defining the test name twice (once in TOOL_ROOTS and again in TEST_ROOTS).
 # Tests defined here should not be defined in TOOL_ROOTS and TEST_ROOTS.
-TEST_TOOL_ROOTS := bpred
+TEST_TOOL_ROOTS := loadStore
 
 # This defines the tests to be run that were not already defined in TEST_TOOL_ROOTS.
 TEST_ROOTS :=
@@ -41,7 +41,7 @@ TOOL_ROOTS :=
 SA_TOOL_ROOTS :=
 
 # This defines all the applications that will be run during the tests.
-APP_ROOTS := bpred
+APP_ROOTS := loadStore
 
 # This defines any additional object files that need to be compiled.
 OBJECT_ROOTS :=
@@ -174,3 +174,20 @@ $(OBJDIR)divide_by_zero$(EXE_SUFFIX): divide_by_zero_$(TARGET_OS).c
 
 $(OBJDIR)thread_app$(EXE_SUFFIX): thread_$(OS_TYPE).c
 	$(APP_CC) $(APP_CXXFLAGS) $(COMP_EXE)$@ $< $(APP_LDFLAGS) $(APP_LIBS)
+
+.PHONY: loadStore.lab1
+
+loadStore.lab1:
+	make loadStore.test
+	make -C ./benchmark clean
+	echo 10 > input.txt
+	$(PIN) -t ./obj-intel64/loadStore.so -o loadStore_10.out -- make -C benchmark
+	make -C ./benchmark clean
+	echo 20 > input.txt
+	$(PIN) -t ./obj-intel64/loadStore.so -o loadStore_20.out -- make -C benchmark
+	make -C ./benchmark clean
+	echo 30 > input.txt
+	$(PIN) -t ./obj-intel64/loadStore.so -o loadStore_30.out -- make -C benchmark
+
+all:
+	make loadStore.lab1
